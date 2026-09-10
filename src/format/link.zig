@@ -3,12 +3,11 @@ const codec = @import("../codec/root.zig");
 const address = @import("../wire/address.zig");
 const checksum = @import("../wire/checksum.zig");
 const symbol_table = @import("symbol_table.zig");
-const ctx = @import("ctx.zig");
+const wire = @import("../wire/root.zig");
 const fheap = @import("fheap.zig");
 const btree2 = @import("btree2.zig");
 
 pub const Address = address.Address;
-pub const Superblock = symbol_table.Superblock;
 pub const Entry = symbol_table.Entry;
 pub const GroupListing = symbol_table.GroupListing;
 
@@ -66,12 +65,12 @@ pub const Link = struct {
     corder: ?i64,
 };
 
-/// Reads a link-info payload through a decode context (bounds-checked).
-pub fn readLinkInfo(cx: anytype, offset: u64, len: u16) !LinkInfo {
+/// Reads a link-info payload through the file context (bounds-checked).
+pub fn readLinkInfo(source: anytype, ctx: wire.Context, offset: u64, len: u16) !LinkInfo {
     if (len > max_link_info_bytes) return error.LinkInfoTooLarge;
     var stack: [max_link_info_bytes]u8 = undefined;
-    try cx.readAt(offset, stack[0..len]);
-    return decodeLinkInfo(stack[0..len], cx.offsetSize());
+    try source.readAt(offset, stack[0..len]);
+    return decodeLinkInfo(stack[0..len], ctx.widths.offset);
 }
 
 /// Decodes a link-info message payload (pure, bounds-checked).
@@ -187,20 +186,19 @@ pub fn listCompact(
     slots: []const MessageRange,
     track_corder: bool,
     source: anytype,
-    superblock: Superblock,
+    ctx: wire.Context,
     allocator: std.mem.Allocator,
 ) !GroupListing {
-    var cx_holder = ctx.Ctx(@TypeOf(source.*)).init(source.*, superblock);
-    const cx = &cx_holder;
+    if (slots.len > ctx.limits.compact_links) return error.TooManyCompactLinks;
     var collector = Collector{};
     defer collector.deinit(allocator);
 
     for (slots) |slot| {
         const payload = try allocator.alloc(u8, slot.len);
         defer allocator.free(payload);
-        try cx.readAt(slot.offset, payload);
-        const link = try decodeLink(payload, cx.offsetSize());
-        try collector.add(link.name, link.target, link.corder, allocator);
+        try source.readAt(slot.offset, payload);
+        const link = try decodeLink(payload, ctx.widths.offset);
+        try collector.add(link.name, link.target, link.link_type, link.corder, allocator);
     }
     return collector.finish(track_corder, allocator);
 }
@@ -212,24 +210,21 @@ pub fn listCompact(
 pub fn listDense(
     info: LinkInfo,
     source: anytype,
-    superblock: Superblock,
+    ctx: wire.Context,
     allocator: std.mem.Allocator,
 ) !GroupListing {
-    var cx_holder = ctx.Ctx(@TypeOf(source.*)).init(source.*, superblock);
-    const cx = &cx_holder;
-
-    const heap = try fheap.open(cx, info.fheap_address, allocator);
-    var ids = try btree2.collectIds(cx, info.name_btree_address, btree2.GRP_DENSE_NAME, heap.id_len, allocator);
+    const heap = try fheap.open(source, ctx, info.fheap_address, allocator);
+    var ids = try btree2.collectIds(source, ctx, info.name_btree_address, btree2.GRP_DENSE_NAME, heap.id_len, allocator);
     defer ids.deinit(allocator);
 
     var collector = Collector{};
     defer collector.deinit(allocator);
     for (ids.records) |rec| {
-        const object = try fheap.readManaged(heap, cx, rec.id, allocator);
+        const object = try fheap.readManaged(source, ctx, heap, rec.id, allocator);
         defer allocator.free(object);
-        const link = try decodeLink(object, cx.offsetSize());
+        const link = try decodeLink(object, ctx.widths.offset);
         if (checksum.metadata(link.name) != rec.hash) return error.CorruptNameHash;
-        try collector.add(link.name, link.target, link.corder, allocator);
+        try collector.add(link.name, link.target, link.link_type, link.corder, allocator);
     }
     return collector.finish(false, allocator);
 }
@@ -243,6 +238,7 @@ const Collector = struct {
         start: usize,
         len: usize,
         target: Address,
+        kind: symbol_table.LinkKind,
         corder: ?i64,
     };
 
@@ -255,6 +251,7 @@ const Collector = struct {
         self: *Collector,
         name: []const u8,
         target: Address,
+        link_type: LinkType,
         corder: ?i64,
         allocator: std.mem.Allocator,
     ) !void {
@@ -265,6 +262,12 @@ const Collector = struct {
             .start = start,
             .len = name.len,
             .target = target,
+            .kind = switch (link_type) {
+                .hard => .hard,
+                .soft => .soft,
+                .external => .external,
+                .user_defined => .user_defined,
+            },
             .corder = corder,
         });
     }
@@ -283,6 +286,7 @@ const Collector = struct {
                 .name = heap_data[raw.start..][0..raw.len],
                 .object_header = raw.target,
                 .cache_type = 0, // ponytail: v1 cache types don't apply to v2 links.
+                .kind = raw.kind,
                 .corder = raw.corder,
             };
         }

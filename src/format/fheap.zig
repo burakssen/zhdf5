@@ -2,6 +2,7 @@ const std = @import("std");
 const codec = @import("../codec/root.zig");
 const address = @import("../wire/address.zig");
 const checksum = @import("../wire/checksum.zig");
+const wire = @import("../wire/root.zig");
 
 pub const Address = address.Address;
 
@@ -9,11 +10,6 @@ pub const header_signature = [4]u8{ 'F', 'R', 'H', 'P' };
 pub const direct_signature = [4]u8{ 'F', 'H', 'D', 'B' };
 pub const indirect_signature = [4]u8{ 'F', 'H', 'I', 'B' };
 
-const max_id_len: u8 = 64;
-// ponytail: blocks bigger than this are rejected, not buffered.
-const max_block_bytes: u64 = 64 * 1024 * 1024;
-// ponytail: headers bigger than this skip checksum verification (reported false)
-// instead of allocating; real headers are ~150 bytes.
 const max_header_stack: usize = 512;
 
 pub const Heap = struct {
@@ -36,14 +32,14 @@ pub const Heap = struct {
 /// root direct block when it is the only block (reported, not fatal).
 // ponytail: managed objects only — huge/tiny objects, filtered heaps, and
 // multi-level indirect heaps are explicit errors, not silent gaps.
-pub fn open(cx: anytype, heap_address: Address, allocator: std.mem.Allocator) !Heap {
-    const abs = try cx.resolve(heap_address);
-    var dec = try cx.readerAt(abs);
+pub fn open(source: anytype, ctx: wire.Context, heap_address: Address, allocator: std.mem.Allocator) !Heap {
+    const abs = try ctx.resolve(heap_address);
+    var dec = try codec.readerAt(source, abs);
     try dec.expectBytes(&header_signature);
 
     if (try dec.readByte() != 0) return error.UnsupportedHeapVersion;
     const id_len = try dec.readInt(u16, .little);
-    if (id_len == 0 or id_len > max_id_len) return error.UnsupportedHeapIdLength;
+    if (id_len == 0 or id_len > ctx.limits.heap_id_len) return error.UnsupportedHeapIdLength;
     if (try dec.readInt(u16, .little) != 0) return error.FilteredHeapUnsupported;
 
     const heap_flags = try dec.readByte();
@@ -52,30 +48,30 @@ pub fn open(cx: anytype, heap_address: Address, allocator: std.mem.Allocator) !H
     // ponytail: huge-id wrapping only affects huge objects, which this reader never touches.
     const max_man_size = try dec.readInt(u32, .little);
 
-    _ = try cx.readLength(&dec); // huge_next_id
-    _ = try cx.readAddress(&dec); // huge btree
-    _ = try cx.readLength(&dec); // total_man_free
-    _ = try cx.readAddress(&dec); // free-space header
-    _ = try cx.readLength(&dec); // man_size
-    _ = try cx.readLength(&dec); // man_alloc_size
-    _ = try cx.readLength(&dec); // man_iter_off
-    _ = try cx.readLength(&dec); // man_nobjs
-    _ = try cx.readLength(&dec); // huge_size
-    _ = try cx.readLength(&dec); // huge_nobjs
-    _ = try cx.readLength(&dec); // tiny_size
-    if (try cx.readLength(&dec) != 0) return error.TinyObjectsUnsupported;
+    _ = try wire.readLength(&dec, ctx.widths.length); // huge_next_id
+    _ = try wire.readAddress(&dec, ctx.widths.offset); // huge btree
+    _ = try wire.readLength(&dec, ctx.widths.length); // total_man_free
+    _ = try wire.readAddress(&dec, ctx.widths.offset); // free-space header
+    _ = try wire.readLength(&dec, ctx.widths.length); // man_size
+    _ = try wire.readLength(&dec, ctx.widths.length); // man_alloc_size
+    _ = try wire.readLength(&dec, ctx.widths.length); // man_iter_off
+    _ = try wire.readLength(&dec, ctx.widths.length); // man_nobjs
+    _ = try wire.readLength(&dec, ctx.widths.length); // huge_size
+    _ = try wire.readLength(&dec, ctx.widths.length); // huge_nobjs
+    _ = try wire.readLength(&dec, ctx.widths.length); // tiny_size
+    if (try wire.readLength(&dec, ctx.widths.length) != 0) return error.TinyObjectsUnsupported;
 
     const table_width = try dec.readInt(u16, .little);
     if (table_width == 0) return error.CorruptHeap;
-    const start_block_size = try cx.readLength(&dec);
-    if (start_block_size == 0 or start_block_size > max_block_bytes) return error.CorruptHeap;
-    const max_direct_size = try cx.readLength(&dec);
+    const start_block_size = try wire.readLength(&dec, ctx.widths.length);
+    if (start_block_size == 0 or start_block_size > ctx.limits.block_bytes) return error.CorruptHeap;
+    const max_direct_size = try wire.readLength(&dec, ctx.widths.length);
     const max_index = try dec.readInt(u16, .little);
     // Block offsets address the whole heap (2^max_index bytes); heap IDs
     // carry their own offset width, and the two agree on consistent files.
     const heap_off_size: u8 = if (max_index == 0) 1 else if (max_index > 64) return error.CorruptHeap else @intCast((max_index - 1) / 8 + 1);
     _ = try dec.readInt(u16, .little); // start_root_rows
-    const table_addr = try cx.readAddress(&dec);
+    const table_addr = try wire.readAddress(&dec, ctx.widths.offset);
     const curr_root_rows = try dec.readInt(u16, .little);
 
     const hdr_len = dec.position() - abs;
@@ -84,7 +80,7 @@ pub fn open(cx: anytype, heap_address: Address, allocator: std.mem.Allocator) !H
     if (hdr_len <= max_header_stack) {
         var stack: [max_header_stack]u8 = undefined;
         const n: usize = @intCast(hdr_len);
-        try cx.readAt(abs, stack[0..n]);
+        try source.readAt(abs, stack[0..n]);
         checksum_valid = (checksum.metadata(stack[0..n]) == stored);
     } else checksum_valid = false;
 
@@ -105,39 +101,39 @@ pub fn open(cx: anytype, heap_address: Address, allocator: std.mem.Allocator) !H
 
     if (curr_root_rows == 0) {
         const raw = table_addr.raw() orelse return error.HeapHasNoRootBlock;
-        const root_block = try cx.resolveRaw(raw);
+        const root_block = try ctx.resolveRaw(raw);
         const block_end = std.math.add(u64, root_block, start_block_size) catch return error.HeapTooLarge;
-        if (block_end > cx.len()) return error.TruncatedHeap;
+        if (block_end > ctx.eof) return error.TruncatedHeap;
         heap.root_block = root_block;
-        try verifyDirectBlock(cx, &heap, root_block, abs, checksum_blocks, allocator);
+        try verifyDirectBlock(source, ctx, &heap, root_block, abs, checksum_blocks, allocator);
         return heap;
     }
 
     // Single-level indirect root: children are direct blocks; deeper nesting
     // is rejected below in locateBlock.
     const traw = table_addr.raw() orelse return error.HeapHasNoRootBlock;
-    const table = try cx.resolveRaw(traw);
+    const table = try ctx.resolveRaw(traw);
     const entries: u64 = @as(u64, curr_root_rows) * table_width;
     // Indirect prefix: magic+ver+heap address+block offset. Block offsets
     // share the heap ID offset width: both address any heap offset.
-    const addr_size: u64 = cx.offsetSize();
+    const addr_size: u64 = ctx.widths.offset;
     const entry_bytes = std.math.mul(u64, entries, addr_size) catch return error.HeapTooLarge;
     const table_size = std.math.add(u64, 5 + addr_size + heap_off_size + entry_bytes, 4) catch return error.HeapTooLarge;
     const table_end = std.math.add(u64, table, table_size) catch return error.HeapTooLarge;
-    if (table_end > cx.len()) return error.TruncatedHeap;
-    if (table_size > max_block_bytes) return error.HeapTooLarge;
+    if (table_end > ctx.eof) return error.TruncatedHeap;
+    if (table_size > ctx.limits.block_bytes) return error.HeapTooLarge;
 
     const tn: usize = @intCast(table_size);
     const tbuf = try allocator.alloc(u8, tn);
     defer allocator.free(tbuf);
-    try cx.readAt(table, tbuf);
+    try source.readAt(table, tbuf);
     if (!std.mem.eql(u8, tbuf[0..4], &indirect_signature)) return error.BadBlockSignature;
     if (tbuf[4] != 0) return error.UnsupportedBlockVersion;
     var tdec = codec.sliceReader(tbuf[5..]);
-    const table_heap = try cx.readAddress(&tdec);
-    if (try cx.resolve(table_heap) != abs) return error.BlockHeapMismatch;
+    const table_heap = try wire.readAddress(&tdec, ctx.widths.offset);
+    if (try ctx.resolve(table_heap) != abs) return error.BlockHeapMismatch;
     // The root indirect block always starts at heap offset zero.
-    const off_at: usize = 5 + cx.offsetSize();
+    const off_at: usize = 5 + ctx.widths.offset;
     if (off_at + heap_off_size > tn) return error.CorruptBlock;
     var block_off: u64 = 0;
     for (tbuf[off_at..][0..heap_off_size], 0..) |b, i| {
@@ -157,7 +153,8 @@ pub fn open(cx: anytype, heap_address: Address, allocator: std.mem.Allocator) !H
 
 /// Validates a direct block's magic and, when enabled, its trailing checksum.
 fn verifyDirectBlock(
-    cx: anytype,
+    source: anytype,
+    ctx: wire.Context,
     heap: *Heap,
     root_block: u64,
     heap_abs: u64,
@@ -165,23 +162,23 @@ fn verifyDirectBlock(
     allocator: std.mem.Allocator,
 ) !void {
     // Block magic is always validated; the full checksum only when enabled.
-    const prefix_len: usize = 5 + cx.offsetSize();
+    const prefix_len: usize = 5 + ctx.widths.offset;
     var prefix: [21]u8 = undefined;
     if (prefix_len > prefix.len) return error.CorruptBlock;
-    try cx.readAt(root_block, prefix[0..prefix_len]);
+    try source.readAt(root_block, prefix[0..prefix_len]);
     var pdec = codec.sliceReader(prefix[0..prefix_len]);
     try pdec.expectBytes(&direct_signature);
     if (try pdec.readByte() != 0) return error.UnsupportedBlockVersion;
-    const block_heap = try cx.readAddress(&pdec);
-    if (try cx.resolve(block_heap) != heap_abs) return error.BlockHeapMismatch;
+    const block_heap = try wire.readAddress(&pdec, ctx.widths.offset);
+    if (try ctx.resolve(block_heap) != heap_abs) return error.BlockHeapMismatch;
 
     if (checksum_blocks) {
         const n: usize = @intCast(heap.block_size);
         const block = try allocator.alloc(u8, n);
         defer allocator.free(block);
-        try cx.readAt(root_block, block);
+        try source.readAt(root_block, block);
         // Checksum sits at the end of the block prefix: magic+ver+checksum+addr+offset.
-        const field_at: usize = 9 + cx.offsetSize() + heap.off_size - 4;
+        const field_at: usize = 9 + ctx.widths.offset + heap.off_size - 4;
         if (field_at + 4 > block.len) return error.CorruptBlock;
         const stored_block = std.mem.readInt(u32, block[field_at..][0..4], .little);
         @memset(block[field_at..][0..4], 0);
@@ -190,7 +187,7 @@ fn verifyDirectBlock(
 }
 
 /// Reads a managed object by heap ID into owned memory.
-pub fn readManaged(heap: Heap, cx: anytype, id: []const u8, allocator: std.mem.Allocator) ![]u8 {
+pub fn readManaged(source: anytype, ctx: wire.Context, heap: Heap, id: []const u8, allocator: std.mem.Allocator) ![]u8 {
     if (id.len != heap.id_len) return error.CorruptHeapId;
     if (id[0] != 0) return error.HugeOrTinyUnsupported; // ponytail: managed objects only.
     var off: u64 = 0;
@@ -203,14 +200,14 @@ pub fn readManaged(heap: Heap, cx: anytype, id: []const u8, allocator: std.mem.A
     }
     if (len == 0) return error.CorruptHeapId;
 
-    const loc = try locateBlock(heap, cx, off);
+    const loc = try locateBlock(source, ctx, heap, off);
     const abs_off = std.math.add(u64, loc.base, loc.inner) catch return error.HeapTooLarge;
     const end = std.math.add(u64, abs_off, len) catch return error.HeapTooLarge;
-    if (end > loc.base + loc.size or end > cx.len()) return error.TruncatedHeapObject;
+    if (end > loc.base + loc.size or end > ctx.eof) return error.TruncatedHeapObject;
 
     const buf = try allocator.alloc(u8, @intCast(len));
     errdefer allocator.free(buf);
-    try cx.readAt(abs_off, buf);
+    try source.readAt(abs_off, buf);
     return buf;
 }
 
@@ -227,7 +224,7 @@ const BlockLoc = struct {
 /// and are rejected below.
 // ponytail: multi-level indirect heaps are an explicit error; single-level
 // roots cover ~2MB of links.
-fn locateBlock(heap: Heap, cx: anytype, off: u64) !BlockLoc {
+fn locateBlock(source: anytype, ctx: wire.Context, heap: Heap, off: u64) !BlockLoc {
     if (!heap.indirect) {
         return .{ .base = heap.root_block, .inner = off, .size = heap.block_size };
     }
@@ -236,7 +233,7 @@ fn locateBlock(heap: Heap, cx: anytype, off: u64) !BlockLoc {
     const first_span = std.math.mul(u64, width, heap.block_size) catch return error.HeapTooLarge;
     if (off < first_span) {
         if (heap.block_size > heap.max_direct_size) return error.TooDeepHeap;
-        return locateInRow(heap, cx, 0, off, heap.block_size);
+        return locateInRow(source, ctx, heap, 0, off, heap.block_size);
     }
 
     var row_off = first_span;
@@ -252,25 +249,25 @@ fn locateBlock(heap: Heap, cx: anytype, off: u64) !BlockLoc {
         row += 1;
         bsize = std.math.mul(u64, bsize, 2) catch return error.TooDeepHeap;
     }
-    return locateInRow(heap, cx, row, off - row_off, bsize);
+    return locateInRow(source, ctx, heap, row, off - row_off, bsize);
 }
 
 /// Resolves one row-relative offset to a child block address.
-fn locateInRow(heap: Heap, cx: anytype, row: u16, rel: u64, bsize: u64) !BlockLoc {
+fn locateInRow(source: anytype, ctx: wire.Context, heap: Heap, row: u16, rel: u64, bsize: u64) !BlockLoc {
     const width: u64 = heap.table_width;
     const col = rel / bsize;
     const inner = rel % bsize;
-    const addr_size: u64 = cx.offsetSize();
+    const addr_size: u64 = ctx.widths.offset;
     const slot = std.math.mul(u64, @as(u64, row) * width + col, addr_size) catch return error.HeapTooLarge;
     const entry_at = std.math.add(u64, heap.table, 5 + addr_size + heap.heap_off_size + slot) catch return error.HeapTooLarge;
     var addr_bytes: [16]u8 = undefined;
-    if (cx.offsetSize() > addr_bytes.len) return error.UnsupportedOffsetSize;
-    if (entry_at + cx.offsetSize() > cx.len()) return error.TruncatedHeap;
-    try cx.readAt(entry_at, addr_bytes[0..cx.offsetSize()]);
-    var dec = codec.sliceReader(addr_bytes[0..cx.offsetSize()]);
-    const child = try address.readAddress(&dec, cx.offsetSize());
+    if (ctx.widths.offset > addr_bytes.len) return error.UnsupportedOffsetSize;
+    if (entry_at + ctx.widths.offset > ctx.eof) return error.TruncatedHeap;
+    try source.readAt(entry_at, addr_bytes[0..ctx.widths.offset]);
+    var dec = codec.sliceReader(addr_bytes[0..ctx.widths.offset]);
+    const child = try wire.readAddress(&dec, ctx.widths.offset);
     const raw = child.raw() orelse return error.CorruptHeapId;
-    return .{ .base = try cx.resolveRaw(raw), .inner = inner, .size = bsize };
+    return .{ .base = try ctx.resolveRaw(raw), .inner = inner, .size = bsize };
 }
 
 fn bytesFor(value: u32) u8 {
@@ -281,7 +278,6 @@ fn bytesFor(value: u32) u8 {
 }
 
 test "opens a minimal heap and reads a managed object" {
-    const testing = @import("testing.zig");
     // Header: FRHP ver0 id_len=4 filter=0 flags=0 max_man=200, empty counters,
     // table width=1 start=64 ... root direct at 256.
     var hdr: [160]u8 = undefined;
@@ -327,23 +323,22 @@ test "opens a minimal heap and reads a managed object" {
     @memcpy(file[272..277], "hello");
 
     const source = codec.SliceSource.init(&file);
-    const sb = testing.testSuperblock();
-    const ctx_mod = @import("ctx.zig");
-    var cx_holder = ctx_mod.Ctx(codec.SliceSource).init(source, sb);
-    const cx = &cx_holder;
-    const heap = try open(cx, .{ .value = 0 }, std.testing.allocator);
+    const ctx = wire.Context{
+        .widths = .{ .offset = 8, .length = 8 },
+        .base_address = 0,
+        .eof = source.len(),
+        .limits = .defaults,
+    };
+    const heap = try open(&source, ctx, .{ .value = 0 }, std.testing.allocator);
     try std.testing.expectEqual(@as(u64, 256), heap.root_block);
     try std.testing.expect(heap.checksum_valid);
 
-    const obj = try readManaged(heap, cx, &[_]u8{ 0, 16, 0, 5 }, std.testing.allocator);
+    const obj = try readManaged(&source, ctx, heap, &[_]u8{ 0, 16, 0, 5 }, std.testing.allocator);
     defer std.testing.allocator.free(obj);
     try std.testing.expectEqualStrings("hello", obj);
 }
 
 test "heap rejects filtered, tiny, indirect, and non-managed ids" {
-    const testing = @import("testing.zig");
-    const ctx_mod = @import("ctx.zig");
-
     var hdr: [160]u8 = undefined;
     var pos: usize = 0;
     @memcpy(hdr[pos..][0..4], "FRHP");
@@ -382,31 +377,32 @@ test "heap rejects filtered, tiny, indirect, and non-managed ids" {
     @memcpy(file[0..hdr_len], hdr[0..hdr_len]);
     @memcpy(file[256..260], "FHDB");
     const source = codec.SliceSource.init(&file);
-    const sb = testing.testSuperblock();
-    var cx_holder = ctx_mod.Ctx(codec.SliceSource).init(source, sb);
-    const cx = &cx_holder;
-    const heap = try open(cx, .{ .value = 0 }, std.testing.allocator);
+    const ctx = wire.Context{
+        .widths = .{ .offset = 8, .length = 8 },
+        .base_address = 0,
+        .eof = source.len(),
+        .limits = .defaults,
+    };
+    const heap = try open(&source, ctx, .{ .value = 0 }, std.testing.allocator);
 
     // Non-managed id flags rejected.
     try std.testing.expectError(
         error.HugeOrTinyUnsupported,
-        readManaged(heap, cx, &[_]u8{ 1, 16, 0, 5 }, std.testing.allocator),
+        readManaged(&source, ctx, heap, &[_]u8{ 1, 16, 0, 5 }, std.testing.allocator),
     );
     // Wrong id length rejected.
     try std.testing.expectError(
         error.CorruptHeapId,
-        readManaged(heap, cx, &[_]u8{ 0, 16, 0 }, std.testing.allocator),
+        readManaged(&source, ctx, heap, &[_]u8{ 0, 16, 0 }, std.testing.allocator),
     );
     // Out-of-block read rejected.
     try std.testing.expectError(
         error.TruncatedHeapObject,
-        readManaged(heap, cx, &[_]u8{ 0, 200, 0, 5 }, std.testing.allocator),
+        readManaged(&source, ctx, heap, &[_]u8{ 0, 200, 0, 5 }, std.testing.allocator),
     );
 }
 
 test "indirect root resolves objects through the doubling table" {
-    const testing = @import("testing.zig");
-    const ctx_mod = @import("ctx.zig");
     // Header: id_len=4, 1 root row of width 2, table at 256, start block 32.
     var hdr: [192]u8 = undefined;
     var pos: usize = 0;
@@ -460,25 +456,28 @@ test "indirect root resolves objects through the doubling table" {
     @memcpy(file[394..399], "hello");
 
     const source = codec.SliceSource.init(&file);
-    const sb = testing.testSuperblock();
-    var cx_holder = ctx_mod.Ctx(codec.SliceSource).init(source, sb);
-    const cx = &cx_holder;
-    const heap = try open(cx, .{ .value = 0 }, std.testing.allocator);
+    const ctx = wire.Context{
+        .widths = .{ .offset = 8, .length = 8 },
+        .base_address = 0,
+        .eof = source.len(),
+        .limits = .defaults,
+    };
+    const heap = try open(&source, ctx, .{ .value = 0 }, std.testing.allocator);
     try std.testing.expect(heap.indirect);
     try std.testing.expect(heap.checksum_valid);
 
-    const obj = try readManaged(heap, cx, &[_]u8{ 0, 10, 0, 5 }, std.testing.allocator);
+    const obj = try readManaged(&source, ctx, heap, &[_]u8{ 0, 10, 0, 5 }, std.testing.allocator);
     defer std.testing.allocator.free(obj);
     try std.testing.expectEqualStrings("hello", obj);
 
     // Undefined child entry reads as a corrupt id.
     try std.testing.expectError(
         error.CorruptHeapId,
-        readManaged(heap, cx, &[_]u8{ 0, 40, 0, 5 }, std.testing.allocator),
+        readManaged(&source, ctx, heap, &[_]u8{ 0, 40, 0, 5 }, std.testing.allocator),
     );
     // Offsets past the direct range refuse multi-level descent.
     try std.testing.expectError(
         error.TooDeepHeap,
-        readManaged(heap, cx, &[_]u8{ 0, 200, 0, 1 }, std.testing.allocator),
+        readManaged(&source, ctx, heap, &[_]u8{ 0, 200, 0, 1 }, std.testing.allocator),
     );
 }

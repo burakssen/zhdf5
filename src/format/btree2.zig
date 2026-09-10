@@ -2,6 +2,7 @@ const std = @import("std");
 const codec = @import("../codec/root.zig");
 const address = @import("../wire/address.zig");
 const checksum = @import("../wire/checksum.zig");
+const wire = @import("../wire/root.zig");
 
 pub const Address = address.Address;
 
@@ -13,10 +14,7 @@ pub const leaf_signature = [4]u8{ 'B', 'T', 'L', 'F' };
 // implemented; every other B-tree type is rejected at the header.
 pub const GRP_DENSE_NAME: u8 = 5;
 
-const max_depth: u8 = 8;
-const max_nodes: u32 = 4096;
-// ponytail: nodes bigger than this are rejected, not buffered.
-const max_node_bytes: u64 = 16 * 1024 * 1024;
+const max_depth: u8 = 8; // hard cap sizing TreeModel.levels; policy is ctx.limits.btree_depth.
 
 pub const Record = struct {
     hash: u32,
@@ -37,43 +35,44 @@ pub const IdList = struct {
 /// Walks a version-2 B-tree name index, collecting (hash, heap id) records
 /// in index order. Checksums are verified and reported, never fatal.
 pub fn collectIds(
-    cx: anytype,
+    source: anytype,
+    ctx: wire.Context,
     btree_addr: Address,
     expected_type: u8,
     id_len: u8,
     allocator: std.mem.Allocator,
 ) !IdList {
-    const abs = try cx.resolve(btree_addr);
-    var dec = try cx.readerAt(abs);
+    const abs = try ctx.resolve(btree_addr);
+    var dec = try codec.readerAt(source, abs);
     try dec.expectBytes(&header_signature);
 
     if (try dec.readByte() != 0) return error.UnsupportedBTreeVersion;
     if (try dec.readByte() != expected_type) return error.WrongBTreeType;
     const node_size = try dec.readInt(u32, .little);
-    if (node_size < 10 or node_size > max_node_bytes) return error.CorruptNodeSize;
+    if (node_size < 10 or node_size > ctx.limits.node_bytes) return error.CorruptNodeSize;
     const rrec_size = try dec.readInt(u16, .little);
     if (rrec_size != 4 + id_len) return error.CorruptRecordLayout;
     const depth = try dec.readInt(u16, .little);
-    if (depth > max_depth) return error.BTreeTooDeep;
+    if (depth > max_depth or depth > ctx.limits.btree_depth) return error.BTreeTooDeep;
     _ = try dec.readByte(); // split percent; ponytail: tuning hint, unchecked on read.
     _ = try dec.readByte(); // merge percent; ponytail: tuning hint, unchecked on read.
-    const root_addr = try cx.readAddress(&dec);
+    const root_addr = try wire.readAddress(&dec, ctx.widths.offset);
     const root_nrec = try dec.readInt(u16, .little);
-    const all_nrec = try cx.readLength(&dec);
+    const all_nrec = try wire.readLength(&dec, ctx.widths.length);
 
     const hdr_len = dec.position() - abs;
     const stored = try dec.readInt(u32, .little);
     const hspan: usize = @intCast(hdr_len);
     const hbuf = try allocator.alloc(u8, hspan);
     defer allocator.free(hbuf);
-    try cx.readAt(abs, hbuf);
+    try source.readAt(abs, hbuf);
     var checksum_valid = (checksum.metadata(hbuf) == stored);
 
     var out: std.ArrayList(Record) = .empty;
     defer out.deinit(allocator);
     var nodes: u32 = 0;
     var seen: u64 = 0;
-    const model = try computeModel(node_size, rrec_size, depth, cx.offsetSize());
+    const model = try computeModel(node_size, rrec_size, depth, ctx.widths.offset);
     const tree = Tree{
         .node_size = node_size,
         .id_len = id_len,
@@ -81,8 +80,8 @@ pub fn collectIds(
         .count_width = model.count_width,
         .levels = model.levels[0..],
     };
-    const root_abs = try cx.resolve(root_addr);
-    try walkNode(cx, root_abs, root_nrec, @intCast(depth), tree, &out, &nodes, &seen, &checksum_valid, allocator);
+    const root_abs = try ctx.resolve(root_addr);
+    try walkNode(source, ctx, root_abs, root_nrec, @intCast(depth), tree, &out, &nodes, &seen, &checksum_valid, allocator);
 
     if (seen != all_nrec) return error.CorruptCount;
     return .{ .records = try out.toOwnedSlice(allocator), .checksum_valid = checksum_valid };
@@ -134,7 +133,8 @@ fn encSize(limit: u64) u8 {
 }
 
 fn walkNode(
-    cx: anytype,
+    source: anytype,
+    ctx: wire.Context,
     node_addr: u64,
     nrec: u16,
     depth: u8,
@@ -146,15 +146,15 @@ fn walkNode(
     allocator: std.mem.Allocator,
 ) !void {
     nodes.* += 1;
-    if (nodes.* > max_nodes) return error.TooManyNodes;
+    if (nodes.* > ctx.limits.btree_nodes) return error.TooManyNodes;
     seen.* = std.math.add(u64, seen.*, nrec) catch return error.CorruptCount;
 
     const size: usize = tree.node_size;
     const end = std.math.add(u64, node_addr, tree.node_size) catch return error.HeapTooLarge;
-    if (end > cx.len()) return error.TruncatedNode;
+    if (end > ctx.eof) return error.TruncatedNode;
     const buf = try allocator.alloc(u8, size);
     defer allocator.free(buf);
-    try cx.readAt(node_addr, buf);
+    try source.readAt(node_addr, buf);
 
     var pos: usize = 0;
     if (depth == 0) {
@@ -187,15 +187,15 @@ fn walkNode(
         }
         var p: u16 = 0;
         while (p < nrec + 1) : (p += 1) {
-            const child = try takeAddress(buf, &pos, cx.offsetSize());
+            const child = try takeAddress(buf, &pos, ctx.widths.offset);
             const child_nrec = try takeSized(buf, &pos, tree.count_width);
             if (child_nrec > lvl.max_nrec) return error.CorruptNode;
             if (depth > 1) {
                 const child_all = try takeSized(buf, &pos, lvl.cum_size);
                 if (child_all > lvl.cum) return error.CorruptNode;
             }
-            const child_abs = try cx.resolve(child);
-            try walkNode(cx, child_abs, @intCast(child_nrec), depth - 1, tree, out, nodes, seen, checksum_valid, allocator);
+            const child_abs = try ctx.resolve(child);
+            try walkNode(source, ctx, child_abs, @intCast(child_nrec), depth - 1, tree, out, nodes, seen, checksum_valid, allocator);
         }
     }
 
@@ -255,7 +255,6 @@ fn writeChecksum(buf: []u8, start: usize, end: usize) void {
 }
 
 test "collects ids from a single leaf node" {
-    const testing = @import("testing.zig");
     // Header: BTHD ver0 type5 node_size=64 rrec=11 depth=0 nrec=2 all=2.
     var file = [_]u8{0} ** 256;
     var pos: usize = 0;
@@ -307,10 +306,13 @@ test "collects ids from a single leaf node" {
     try std.testing.expectEqual(@as(usize, 64 + 6 + 22 + 4), lp);
 
     const source = codec.SliceSource.init(&file);
-    const ctx_mod = @import("ctx.zig");
-    var cx_holder = ctx_mod.Ctx(codec.SliceSource).init(source, testing.testSuperblock());
-    const cx = &cx_holder;
-    var list = try collectIds(cx, .{ .value = 0 }, GRP_DENSE_NAME, 7, std.testing.allocator);
+    const ctx = wire.Context{
+        .widths = .{ .offset = 8, .length = 8 },
+        .base_address = 0,
+        .eof = source.len(),
+        .limits = .defaults,
+    };
+    var list = try collectIds(&source, ctx, .{ .value = 0 }, GRP_DENSE_NAME, 7, std.testing.allocator);
     defer list.deinit(std.testing.allocator);
     try std.testing.expect(list.checksum_valid);
     try std.testing.expectEqual(@as(usize, 2), list.records.len);
@@ -320,7 +322,6 @@ test "collects ids from a single leaf node" {
 }
 
 test "internal nodes recurse with varint child counts" {
-    const testing = @import("testing.zig");
     // Header depth=1, root internal (1 rec) with 2 leaf children, all_nrec=2.
     var file = [_]u8{0} ** 512;
     var pos: usize = 0;
@@ -399,10 +400,13 @@ test "internal nodes recurse with varint child counts" {
     lp2 += 4;
 
     const source = codec.SliceSource.init(&file);
-    const ctx_mod = @import("ctx.zig");
-    var cx_holder = ctx_mod.Ctx(codec.SliceSource).init(source, testing.testSuperblock());
-    const cx = &cx_holder;
-    var list = try collectIds(cx, .{ .value = 0 }, GRP_DENSE_NAME, 7, std.testing.allocator);
+    const ctx = wire.Context{
+        .widths = .{ .offset = 8, .length = 8 },
+        .base_address = 0,
+        .eof = source.len(),
+        .limits = .defaults,
+    };
+    var list = try collectIds(&source, ctx, .{ .value = 0 }, GRP_DENSE_NAME, 7, std.testing.allocator);
     defer list.deinit(std.testing.allocator);
     try std.testing.expect(list.checksum_valid);
     try std.testing.expectEqual(@as(usize, 3), list.records.len);

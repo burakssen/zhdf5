@@ -22,6 +22,11 @@ pub const Context = struct {
     /// Resolves a base-relative file address to an absolute file offset.
     pub fn resolve(self: Context, addr: FileAddress) !u64 {
         const raw = addr.raw() orelse return error.UndefinedAddress;
+        return self.resolveRaw(raw);
+    }
+
+    /// Resolves an already-unwrapped address value.
+    pub fn resolveRaw(self: Context, raw: u64) !u64 {
         return std.math.add(u64, self.base_address, raw);
     }
 };
@@ -34,6 +39,7 @@ test "context resolves against its base address" {
         .limits = .defaults,
     };
     try std.testing.expectEqual(@as(u64, 560), try ctx.resolve(.{ .value = 48 }));
+    try std.testing.expectEqual(@as(u64, 560), try ctx.resolveRaw(48));
     try std.testing.expectError(error.UndefinedAddress, ctx.resolve(.undefined_address));
     try std.testing.expectError(error.Overflow, (Context{
         .widths = .{ .offset = 8, .length = 8 },

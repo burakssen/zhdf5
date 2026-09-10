@@ -4,6 +4,8 @@
 //! the parser independent from files, memory mapping, network storage, or any
 //! particular std.Io implementation.
 
+const std = @import("std");
+
 const reader = @import("reader.zig");
 const writer = @import("writer.zig");
 const source = @import("source.zig");
@@ -22,6 +24,13 @@ pub const CountingSink = sink.CountingSink;
 /// Convenience constructor for the common zero-copy in-memory reader.
 pub fn sliceReader(data: []const u8) Reader(SliceSource) {
     return Reader(SliceSource).init(SliceSource.init(data));
+}
+
+/// Positioned reader over any random-access source.
+pub fn readerAt(src: anytype, offset: u64) !Reader(@TypeOf(src.*)) {
+    var r = Reader(@TypeOf(src.*)).init(src.*);
+    try r.seek(offset);
+    return r;
 }
 
 /// Convenience constructor for a writer backed by a caller-owned fixed buffer.
@@ -46,4 +55,10 @@ test {
     _ = source;
     _ = sink;
     _ = common;
+}
+
+test "readerAt seeks to the requested offset" {
+    const src = SliceSource.init(&[_]u8{ 10, 20, 30 });
+    var r = try readerAt(&src, 1);
+    try std.testing.expectEqual(@as(u8, 20), try r.readByte());
 }

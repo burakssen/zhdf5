@@ -13,6 +13,7 @@ pub const Superblock = format.Superblock;
 pub const Address = format.Address;
 pub const ObjectHeader = format.ObjectHeader;
 pub const GroupListing = format.GroupListing;
+pub const LegacyGroupParams = format.LegacyGroupParams;
 
 pub const decodeSuperblock = format.decodeSuperblock;
 pub const decodeObjectHeader = format.decodeObjectHeader;
