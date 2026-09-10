@@ -25,48 +25,19 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("  checksum valid:  {}\n", .{valid});
     }
 
-    const root_off = try superblock.rootObjectHeaderFileOffset();
-    const header = try zhdf5.decodeObjectHeader(&file.source, file.ctx, root_off);
-    std.debug.print("  root header:     off={d} msgs={d}\n", .{ root_off, header.messages_seen });
+    var root = try file.group("/", init.arena.allocator());
+    var root_listing = try root.list(init.arena.allocator());
+    defer root_listing.deinit(init.arena.allocator());
+    std.debug.print("  root header:     off={d} msgs={d}\n", .{ root.object.header.file_offset, root.object.header.messages_seen });
+    printGroup("root", &root_listing);
 
-    var root = try listHeader(header, &file, init.arena.allocator());
-    defer root.deinit(init.arena.allocator());
-    printGroup("root", &root);
-
-    // ponytail: one nesting level only; full path walking is a later iteration.
     if (args.len == 3) {
-        const wanted = args[2];
-        const child = for (root.entries) |entry| {
-            if (std.mem.eql(u8, entry.name, wanted)) break entry;
-        } else return error.GroupNotFound;
-        const child_off = try file.ctx.resolve(child.object_header);
-        const child_header = try zhdf5.decodeObjectHeader(&file.source, file.ctx, child_off);
-        var nested = try listHeader(child_header, &file, init.arena.allocator());
-        defer nested.deinit(init.arena.allocator());
-        printGroup(wanted, &nested);
+        const child_path = try std.fmt.allocPrint(init.arena.allocator(), "/{s}", .{args[2]});
+        var nested = try file.group(child_path, init.arena.allocator());
+        var nested_listing = try nested.list(init.arena.allocator());
+        defer nested_listing.deinit(init.arena.allocator());
+        printGroup(args[2], &nested_listing);
     }
-}
-
-fn listHeader(
-    header: zhdf5.ObjectHeader,
-    file: *zhdf5.File,
-    allocator: std.mem.Allocator,
-) !zhdf5.GroupListing {
-    if (header.symbol_table) |symtab| {
-        const params = try zhdf5.LegacyGroupParams.fromSuperblock(file.superblock);
-        return zhdf5.listGroup(&file.source, file.ctx, params, symtab.btree_address, symtab.heap_address, allocator);
-    }
-    const info = header.link_info orelse return error.NoGroupMessage;
-    if (info.isDense()) {
-        return zhdf5.listDenseLinks(info, &file.source, file.ctx, allocator);
-    }
-    return zhdf5.listCompactLinks(
-        header.link_slots[0..header.link_count],
-        header.track_corder,
-        &file.source,
-        file.ctx,
-        allocator,
-    );
 }
 
 fn printGroup(label: []const u8, listing: *const zhdf5.GroupListing) void {

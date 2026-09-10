@@ -5,6 +5,9 @@ const std = @import("std");
 const format = @import("../format/root.zig");
 const io = @import("../io/root.zig");
 const wire = @import("../wire/root.zig");
+const group_mod = @import("group.zig");
+const object_mod = @import("object.zig");
+const path_mod = @import("path.zig");
 
 pub const OpenOptions = struct {
     limits: wire.Limits = .defaults,
@@ -45,6 +48,16 @@ pub const File = struct {
     pub fn deinit(self: *File) void {
         self.file.close(self.io);
         self.* = undefined;
+    }
+
+    /// Opens the object at an absolute path (`/`, `/foo/bar`).
+    pub fn object(self: *File, path: []const u8, allocator: std.mem.Allocator) !object_mod.Object {
+        return path_mod.lookup(self, path, allocator);
+    }
+
+    /// Opens the group at an absolute path; errors if it is not a group.
+    pub fn group(self: *File, path: []const u8, allocator: std.mem.Allocator) !group_mod.Group {
+        return group_mod.Group.fromObject(try self.object(path, allocator));
     }
 };
 

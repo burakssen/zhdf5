@@ -8,6 +8,10 @@ pub const reader = @import("reader/root.zig");
 
 pub const File = reader.File;
 pub const OpenOptions = reader.OpenOptions;
+pub const Object = reader.Object;
+pub const ObjectKind = reader.ObjectKind;
+pub const Group = reader.Group;
+pub const GroupEntry = reader.GroupEntry;
 
 pub const Superblock = format.Superblock;
 pub const Address = format.Address;
