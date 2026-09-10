@@ -4,17 +4,26 @@ pub const codec = @import("codec/root.zig");
 pub const wire = @import("wire/root.zig");
 pub const format = @import("format/root.zig");
 pub const io = @import("io/root.zig");
+pub const reader = @import("reader/root.zig");
+
+pub const File = reader.File;
+pub const OpenOptions = reader.OpenOptions;
 
 pub const Superblock = format.Superblock;
 pub const Address = format.Address;
+pub const ObjectHeader = format.ObjectHeader;
 pub const GroupListing = format.GroupListing;
 
 pub const decodeSuperblock = format.decodeSuperblock;
+pub const decodeObjectHeader = format.decodeObjectHeader;
 pub const listGroup = format.listGroup;
+pub const listCompactLinks = format.listCompactLinks;
+pub const listDenseLinks = format.listDenseLinks;
 
 test {
     _ = codec;
     _ = wire;
     _ = format;
     _ = io;
+    _ = reader;
 }
