@@ -4,6 +4,8 @@ pub const signature = @import("signature.zig");
 pub const superblock = @import("superblock.zig");
 pub const ctx = @import("ctx.zig");
 pub const symbol_table = @import("symbol_table.zig");
+pub const fheap = @import("fheap.zig");
+pub const btree2 = @import("btree2.zig");
 
 pub const Address = @import("../wire/address.zig").Address;
 pub const Superblock = superblock.Superblock;
@@ -21,4 +23,6 @@ test {
     _ = superblock;
     _ = ctx;
     _ = symbol_table;
+    _ = fheap;
+    _ = btree2;
 }
