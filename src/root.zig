@@ -12,6 +12,7 @@ pub const Object = reader.Object;
 pub const ObjectKind = reader.ObjectKind;
 pub const Group = reader.Group;
 pub const GroupEntry = reader.GroupEntry;
+pub const Dataset = reader.Dataset;
 
 pub const Superblock = format.Superblock;
 pub const Address = format.Address;

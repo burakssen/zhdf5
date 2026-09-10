@@ -41,9 +41,8 @@ test "lookup resolves nested groups and rejects bad paths" {
     try std.testing.expectEqual(object_mod.Kind.group, root_obj.kind());
     const run42 = try lookup(&file, "/run42", alloc);
     try std.testing.expectEqual(object_mod.Kind.group, run42.kind());
-    // ponytail: dataset discrimination lands with the message ranges.
     const voltage = try lookup(&file, "/run42/voltage", alloc);
-    try std.testing.expectEqual(object_mod.Kind.unknown, voltage.kind());
+    try std.testing.expectEqual(object_mod.Kind.dataset, voltage.kind());
 
     try std.testing.expectError(error.LinkNotFound, lookup(&file, "/nope", alloc));
     try std.testing.expectError(error.LinkNotFound, lookup(&file, "/run42/nope", alloc));

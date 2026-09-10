@@ -25,7 +25,9 @@ pub const Object = struct {
         if (self.header.symbol_table != null or
             self.header.link_info != null or
             self.header.link_count > 0) return .group;
-        // ponytail: dataset discrimination lands with the message ranges.
+        if (self.header.dataspace != null or
+            self.header.datatype != null or
+            self.header.layout != null) return .dataset;
         return .unknown;
     }
 };

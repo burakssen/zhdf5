@@ -7,6 +7,7 @@ const io = @import("../io/root.zig");
 const wire = @import("../wire/root.zig");
 const group_mod = @import("group.zig");
 const object_mod = @import("object.zig");
+const dataset_mod = @import("dataset.zig");
 const path_mod = @import("path.zig");
 
 pub const OpenOptions = struct {
@@ -58,6 +59,11 @@ pub const File = struct {
     /// Opens the group at an absolute path; errors if it is not a group.
     pub fn group(self: *File, path: []const u8, allocator: std.mem.Allocator) !group_mod.Group {
         return group_mod.Group.fromObject(try self.object(path, allocator));
+    }
+
+    /// Opens the dataset at an absolute path; errors if it is not a dataset.
+    pub fn dataset(self: *File, path: []const u8, allocator: std.mem.Allocator) !dataset_mod.Dataset {
+        return dataset_mod.Dataset.fromObject(try self.object(path, allocator), allocator);
     }
 };
 
