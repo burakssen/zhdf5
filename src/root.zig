@@ -7,8 +7,10 @@ pub const io = @import("io/root.zig");
 
 pub const Superblock = format.Superblock;
 pub const Address = format.Address;
+pub const GroupListing = format.GroupListing;
 
 pub const decodeSuperblock = format.decodeSuperblock;
+pub const listGroup = format.listGroup;
 
 test {
     _ = codec;
