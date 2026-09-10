@@ -7,6 +7,9 @@ pub const symbol_table = @import("symbol_table.zig");
 pub const link = @import("link.zig");
 pub const fheap = @import("fheap.zig");
 pub const btree2 = @import("btree2.zig");
+pub const dataspace = @import("dataspace.zig");
+pub const datatype = @import("datatype.zig");
+pub const layout = @import("layout.zig");
 
 pub const Address = @import("../wire/address.zig").Address;
 pub const Superblock = superblock.Superblock;
@@ -14,6 +17,9 @@ pub const SuperblockVersion = superblock.Version;
 pub const ObjectHeader = object_header.Header;
 pub const GroupListing = symbol_table.GroupListing;
 pub const LegacyGroupParams = symbol_table.LegacyGroupParams;
+pub const Dataspace = dataspace.Dataspace;
+pub const Datatype = datatype.Datatype;
+pub const Layout = layout.Layout;
 
 pub const findSignature = signature.find;
 pub const decodeSuperblock = superblock.decode;
@@ -31,4 +37,7 @@ test {
     _ = link;
     _ = fheap;
     _ = btree2;
+    _ = dataspace;
+    _ = datatype;
+    _ = layout;
 }

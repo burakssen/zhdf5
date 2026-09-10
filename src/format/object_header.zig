@@ -29,6 +29,10 @@ pub const Header = struct {
     link_info: ?link.LinkInfo = null,
     link_slots: [link.max_compact_links]link.MessageRange = undefined,
     link_count: u8 = 0,
+    // ponytail: dataset message payloads are located here, decoded on demand by the dataset readers.
+    dataspace: ?link.MessageRange = null,
+    datatype: ?link.MessageRange = null,
+    layout: ?link.MessageRange = null,
     pending_continuation: Continuation = .{ .offset = 0, .length = 0, .present = false },
     // ponytail: v2 decode-time state kept on Header so v1/v2 chunk scanners share one signature.
     track_corder: bool = false,
@@ -49,6 +53,9 @@ pub const v2_signature = [4]u8{ 'O', 'H', 'D', 'R' };
 pub const v2_continuation_signature = [4]u8{ 'O', 'C', 'H', 'K' };
 
 pub const MSG_NIL: u16 = 0x0000;
+pub const MSG_DATASPACE: u16 = 0x0001;
+pub const MSG_DATATYPE: u16 = 0x0003;
+pub const MSG_LAYOUT: u16 = 0x0008;
 pub const MSG_CONTINUATION: u16 = 0x0010;
 pub const MSG_SYMTAB: u16 = 0x0011;
 
@@ -134,6 +141,18 @@ fn scanV1Chunk(
 
         switch (msg_type) {
             MSG_NIL => {},
+            MSG_DATASPACE => {
+                if (header.dataspace != null) return error.DuplicateDataspace;
+                header.dataspace = .{ .offset = data_start, .len = msg_size };
+            },
+            MSG_DATATYPE => {
+                if (header.datatype != null) return error.DuplicateDatatype;
+                header.datatype = .{ .offset = data_start, .len = msg_size };
+            },
+            MSG_LAYOUT => {
+                if (header.layout != null) return error.DuplicateLayout;
+                header.layout = .{ .offset = data_start, .len = msg_size };
+            },
             MSG_CONTINUATION => {
                 if (header.hasContinuation()) return error.DuplicateContinuation;
                 header.pending_continuation = try parseContinuation(source, ctx, data_start);
@@ -274,6 +293,18 @@ fn scanV2Chunk(
             if (header.link_count >= link.max_compact_links or header.link_count >= ctx.limits.compact_links) return error.TooManyCompactLinks;
             header.link_slots[header.link_count] = .{ .offset = data_start, .len = msg_size };
             header.link_count += 1;
+        }
+        if (msg_type == MSG_DATASPACE) {
+            if (header.dataspace != null) return error.DuplicateDataspace;
+            header.dataspace = .{ .offset = data_start, .len = msg_size };
+        }
+        if (msg_type == MSG_DATATYPE) {
+            if (header.datatype != null) return error.DuplicateDatatype;
+            header.datatype = .{ .offset = data_start, .len = msg_size };
+        }
+        if (msg_type == MSG_LAYOUT) {
+            if (header.layout != null) return error.DuplicateLayout;
+            header.layout = .{ .offset = data_start, .len = msg_size };
         }
 
         try reader.seek(data_end);
@@ -420,6 +451,39 @@ test "v2 bad checksum is reported, not fatal" {
     };
     const header = try decode(&source, ctx, 0);
     try std.testing.expectEqual(@as(?bool, false), header.checksum_valid);
+}
+
+test "v2 dataset message ranges are located" {
+    var buf: [64]u8 = undefined;
+    @memcpy(buf[0..4], &v2_signature);
+    buf[4] = 2;
+    buf[5] = 0; // 1-byte chunk size, no optionals
+    buf[6] = 36; // three 4-byte prefixes + 8 payload bytes each
+    var pos: usize = 7;
+    for ([_]u8{ MSG_DATASPACE, MSG_DATATYPE, MSG_LAYOUT }) |t| {
+        buf[pos] = t;
+        buf[pos + 1] = 8;
+        buf[pos + 2] = 0;
+        buf[pos + 3] = 0;
+        @memset(buf[pos + 4 .. pos + 12], 0);
+        pos += 12;
+    }
+    const chk = checksum.metadata(buf[0..pos]);
+    std.mem.writeInt(u32, buf[pos..][0..4], chk, .little);
+    pos += 4;
+    const source = codec.SliceSource.init(buf[0..pos]);
+    const ctx = wire.Context{
+        .widths = .{ .offset = 8, .length = 8 },
+        .base_address = 0,
+        .eof = source.len(),
+        .limits = .defaults,
+    };
+    const header = try decode(&source, ctx, 0);
+    try std.testing.expectEqual(@as(u64, 11), header.dataspace.?.offset);
+    try std.testing.expectEqual(@as(u64, 23), header.datatype.?.offset);
+    try std.testing.expectEqual(@as(u64, 35), header.layout.?.offset);
+    try std.testing.expect(header.symbol_table == null);
+    try std.testing.expect(header.link_info == null);
 }
 
 fn test1RootHeader() [48]u8 {

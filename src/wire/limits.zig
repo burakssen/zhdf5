@@ -24,6 +24,8 @@ pub const Limits = struct {
     heap_id_len: u8 = 64,
     /// Largest heap data segment or block buffered.
     block_bytes: u64 = 64 * 1024 * 1024,
+    /// Highest dataset rank accepted.
+    dataspace_dims: u8 = 32,
 
     pub const defaults: Limits = .{};
     pub const strict: Limits = .{
@@ -36,6 +38,7 @@ pub const Limits = struct {
         .heap_data_bytes = 1024 * 1024,
         .heap_id_len = 16,
         .block_bytes = 16 * 1024 * 1024,
+        .dataspace_dims = 8,
     };
 };
 
